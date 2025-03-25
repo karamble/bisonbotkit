@@ -138,17 +138,25 @@ func LoadClientConfig(configPath string, fileName string) (*ClientConfig, error)
 		return parseClientConfigFile(fullPath)
 	}
 
+	rpcUser, err := utils.GenerateRandomString(8)
+	if err != nil {
+		return nil, err
+	}
+	rpcPass, err := utils.GenerateRandomString(16)
+	if err != nil {
+		return nil, err
+	}
 	// Create default config
 	cfg := &ClientConfig{
 		ServerAddr:     "127.0.0.1:9100",
 		RPCURL:         "wss://127.0.0.1:9754/ws",
 		ServerCertPath: filepath.Join(configPath, "server.cert"),
-		ClientCertPath: filepath.Join(configPath, "client.cert"),
-		ClientKeyPath:  filepath.Join(configPath, "client.key"),
-		GRPCServerCert: filepath.Join(configPath, "rpc.cert"),
-		RPCUser:        "user",
-		RPCPass:        "pass",
-		LogFile:        filepath.Join(configPath, "logs", "pongclient.log"),
+		ClientCertPath: filepath.Join(defaultBRClientDir, "rpc-client.cert"),
+		ClientKeyPath:  filepath.Join(defaultBRClientDir, "rpc-client.key"),
+		GRPCServerCert: filepath.Join(configPath, "server.cert"),
+		RPCUser:        rpcUser,
+		RPCPass:        rpcPass,
+		LogFile:        filepath.Join(configPath, "logs", fileName),
 		Debug:          "info",
 		MaxLogFiles:    5,
 		MaxBufferLines: 1000,

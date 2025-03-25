@@ -10,6 +10,7 @@ import (
 
 	"github.com/decred/slog"
 	"github.com/jrick/logrotate/rotator"
+	"github.com/vctt94/bisonbotkit/utils"
 )
 
 // errMsgRE is a regexp that matches error log msgs.
@@ -89,14 +90,15 @@ type LogConfig struct {
 
 // NewLogBackend creates a new logging backend
 func NewLogBackend(config LogConfig) (*LogBackend, error) {
+	logFile := utils.CleanAndExpandPath(config.LogFile)
 	var logRotator *rotator.Rotator
-	if config.LogFile != "" {
-		logDir, _ := filepath.Split(config.LogFile)
+	if logFile != "" {
+		logDir, _ := filepath.Split(logFile)
 		err := os.MkdirAll(logDir, 0700)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create log directory: %w", err)
 		}
-		logRotator, err = rotator.New(config.LogFile, 1024, false, config.MaxLogFiles)
+		logRotator, err = rotator.New(logFile, 1024, false, config.MaxLogFiles)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create file rotator: %w", err)
 		}

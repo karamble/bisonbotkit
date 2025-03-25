@@ -12,14 +12,24 @@ import (
 	"github.com/vctt94/bisonbotkit/logging"
 )
 
+// Bot represents a BisonRelay bot instance with configuration, RPC clients,
+// and service interfaces for chat and payments.
 type Bot struct {
-	Cfg       *config.BotConfig
+	// Cfg holds the bot's configuration settings
+	Cfg *config.BotConfig
+	// RPCClient is the WebSocket client for JSON-RPC communication
 	RPCClient *jsonrpc.WSClient
-	Chat      types.ChatServiceClient
-	Payment   types.PaymentsServiceClient
-	Log       slog.Logger
+
+	// Chat provides access to BisonRelay chat functionality
+	Chat types.ChatServiceClient
+	// Payment provides access to BisonRelay payment functionality
+	Payment types.PaymentsServiceClient
+	// Log is the bot's logger instance
+	Log slog.Logger
 }
 
+// Run starts the bot and blocks until the context is cancelled or an error occurs.
+// It manages the lifecycle of the RPC client connection.
 func (b *Bot) Run(ctx context.Context) error {
 	if b.RPCClient == nil {
 		return fmt.Errorf("RPC client not initialized")
@@ -27,7 +37,9 @@ func (b *Bot) Run(ctx context.Context) error {
 	return b.RPCClient.Run(ctx)
 }
 
-// NewJSONRPCClient creates a new JSON-RPC client for BisonRelay
+// NewJSONRPCClient creates a new JSON-RPC client for BisonRelay with the specified
+// configuration and logger. It sets up TLS certificates, authentication, and other
+// connection parameters.
 func NewJSONRPCClient(cfg *config.BotConfig, log slog.Logger) (*jsonrpc.WSClient, error) {
 	return jsonrpc.NewWSClient(
 		jsonrpc.WithWebsocketURL(cfg.RPCURL),
@@ -38,6 +50,9 @@ func NewJSONRPCClient(cfg *config.BotConfig, log slog.Logger) (*jsonrpc.WSClient
 	)
 }
 
+// NewBot creates a new Bot instance with the provided configuration and logging backend.
+// It initializes the RPC client and sets up chat and payment service clients.
+// Returns an error if the RPC client initialization fails.
 func NewBot(cfg *config.BotConfig, logBackend *logging.LogBackend) (*Bot, error) {
 	rpcClient, err := NewJSONRPCClient(cfg, logBackend.Logger("RPC"))
 	if err != nil {

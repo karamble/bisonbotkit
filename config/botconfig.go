@@ -142,6 +142,7 @@ func parseConfigFile(configPath string) (*BotConfig, error) {
 // LoadBotConfig attempts to load the bot config from the default locations.
 func LoadBotConfig(configPath string, fileName string) (*BotConfig, error) {
 	defaultConfigPath := utils.AppDataDir(fileName, false)
+	configPath = utils.CleanAndExpandPath(configPath)
 	// If configPath is empty, use defaultConfigPath
 	if configPath == "" {
 		configPath = defaultConfigPath
@@ -152,33 +153,46 @@ func LoadBotConfig(configPath string, fileName string) (*BotConfig, error) {
 		return nil, err
 	}
 
-	// Try to load existing config
 	fullPath := filepath.Join(configPath, fileName)
 	if _, err := os.Stat(fullPath); err == nil {
-		return parseConfigFile(fullPath)
+		cfg, err := parseConfigFile(fullPath)
+		if err == nil {
+			return cfg, nil
+		}
 	}
 
-	// Create default config
+	// If we get here, either the file doesn't exist or couldn't be parsed
+	// Generate new credentials and create default config
+	rpcUser, err := utils.GenerateRandomString(8)
+	if err != nil {
+		return nil, err
+	}
+	rpcPass, err := utils.GenerateRandomString(16)
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &BotConfig{
 		DataDir:        configPath,
-		RPCURL:         "wss://127.0.0.1:9754/ws",
+		RPCURL:         "wss://127.0.0.1:7676/ws",
 		GRPCHost:       "127.0.0.1",
-		GRPCPort:       "9105",
-		HttpPort:       "9100",
+		GRPCPort:       "50051",
+		HttpPort:       "8888",
 		ServerCertPath: filepath.Join(defaultBRClientDir, "rpc.cert"),
-		ClientCertPath: filepath.Join(configPath, "client.cert"),
-		ClientKeyPath:  filepath.Join(configPath, "client.key"),
-		RPCUser:        "user",
-		RPCPass:        "pass",
+		ClientCertPath: filepath.Join(defaultBRClientDir, "rpc-client.cert"),
+		ClientKeyPath:  filepath.Join(defaultBRClientDir, "rpc-client.key"),
+		RPCUser:        rpcUser,
+		RPCPass:        rpcPass,
 		Debug:          "info",
-		LogFile:        filepath.Join(configPath, "logs", "pongbot.log"),
+		MinBetAmt:      0.00000001,
+		LogFile:        filepath.Join(configPath, "logs", "chatbot.log"),
 		MaxLogFiles:    5,
 		MaxBufferLines: 1000,
 	}
 
 	// Write default config
 	if err := writeConfigFile(cfg, fullPath); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to write config file: %v", err)
 	}
 
 	return cfg, nil
