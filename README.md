@@ -14,17 +14,22 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
-	botlib "github.com/vctt94/bisonbotkit"
+	"github.com/companyzero/bisonrelay/clientrpc/types"
+	"github.com/vctt94/bisonbotkit"
+	"github.com/vctt94/bisonbotkit/config"
+	"github.com/vctt94/bisonbotkit/logging"
+	"github.com/vctt94/bisonbotkit/utils"
 )
 
 func main() {
 	// Get application data directory
-	appdata := botlib.AppDataDir("mybot", false)
+	appdata := utils.AppDataDir("mybot", false)
 	
 	// Load bot configuration
-	cfg, err := botlib.LoadBotConfig(appdata, "mybot.conf")
+	cfg, err := config.LoadBotConfig(appdata, "mybot.conf")
 	if err != nil {
 		fmt.Printf("Failed to load config: %v\n", err)
 		os.Exit(1)
@@ -35,12 +40,11 @@ func main() {
 	defer cancel()
 
 	// Set up logging
-	logBackend, err := botlib.NewLogBackend(botlib.LogConfig{
+	logBackend, err := logging.NewLogBackend(logging.LogConfig{
 		LogFile:        filepath.Join(appdata, "logs", "mybot.log"),
 		DebugLevel:     cfg.Debug,
-		MaxLogFiles:    10,
+		MaxLogFiles:    5,
 		MaxBufferLines: 1000,
-		UseStdout: true
 	})
 	if err != nil {
 		fmt.Printf("Failed to create log backend: %v\n", err)
@@ -51,21 +55,36 @@ func main() {
 	// Get a logger for your application
 	log := logBackend.Logger("Bot")
 
+	// Create channels for handling messages (if needed)
+	pmChan := make(chan types.ReceivedPM)
+	// Assign the channel to the config
+	cfg.PMChan = pmChan
+	cfg.PMLog = logBackend.Logger("PM")
+
+	// Create and run the bot
+	bot, err := bisonbotkit.NewBot(cfg, logBackend)
+	if err != nil {
+		log.Errorf("Failed to create bot: %v", err)
+		os.Exit(1)
+	}
+
+	// Add a goroutine to handle incoming private messages
+	go func() {
+		for pm := range pmChan {
+			log.Infof("Received PM from %s: %s", pm.Nick, pm.Msg)
+			// Handle the message here
+		}
+	}()
+
 	// Set up signal handling
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigChan
 		log.Infof("Received shutdown signal")
+		bot.Close()
 		cancel()
 	}()
-
-	// Create and run the bot
-	bot, err := botlib.NewBot(cfg, logBackend)
-	if err != nil {
-		log.Errorf("Failed to create bot: %v", err)
-		os.Exit(1)
-	}
 
 	// Run the bot
 	if err := bot.Run(ctx); err != nil {
