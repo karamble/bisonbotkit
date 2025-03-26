@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/decred/slog"
+
+	"github.com/companyzero/bisonrelay/clientrpc/types"
 	"github.com/vctt94/bisonbotkit/utils"
 )
 
@@ -16,35 +19,53 @@ var (
 
 // BotConfig holds all configuration options for a Bison Relay bot
 type BotConfig struct {
-	DataDir        string
-	IsF2P          bool
-	MinBetAmt      float64
+	DataDir string
+
 	RPCURL         string
-	GRPCHost       string
-	GRPCPort       string
-	HttpPort       string
 	ServerCertPath string
 	ClientCertPath string
 	ClientKeyPath  string
-	RPCUser        string
-	RPCPass        string
-	Debug          string
+
+	GCChan     chan<- types.GCReceivedMsg
+	GCLog      slog.Logger
+	InviteChan chan<- types.ReceivedGCInvite
+
+	PMChan chan<- types.ReceivedPM
+	PMLog  slog.Logger
+
+	PostChan chan<- types.ReceivedPost
+	PostLog  slog.Logger
+
+	PostStatusChan chan<- types.ReceivedPostStatus
+	PostStatusLog  slog.Logger
+
+	TipProgressChan chan<- types.TipProgressEvent
+	TipLog          slog.Logger
+
+	TipReceivedChan chan<- types.ReceivedTip
+	TipReceivedLog  slog.Logger
+
+	KXChan chan<- types.KXCompleted
+	KXLog  slog.Logger
+
+	RPCUser string
+	RPCPass string
+	Debug   string
 	// Logging-related fields
 	LogFile        string // Path to the log file
 	MaxLogFiles    int    // Maximum number of log files to keep
 	MaxBufferLines int    // Maximum number of log lines to buffer
+
+	// Store additional config values that aren't explicitly defined
+	ExtraConfig map[string]string
 }
 
 // Write the configuration to a file.
 func writeConfigFile(cfg *BotConfig, configPath string) error {
+	// Build the basic config string with known fields
 	configData := fmt.Sprintf(
 		`datadir=%s
-isf2p=%t
-minbetamt=%0.8f
 rpcurl=%s
-grpchost=%s
-grpcport=%s
-httpport=%s
 servercertpath=%s
 clientcertpath=%s
 clientkeypath=%s
@@ -56,12 +77,7 @@ maxlogfiles=%d
 maxbufferlines=%d
 `,
 		cfg.DataDir,
-		cfg.IsF2P,
-		cfg.MinBetAmt,
 		cfg.RPCURL,
-		cfg.GRPCHost,
-		cfg.GRPCPort,
-		cfg.HttpPort,
 		cfg.ServerCertPath,
 		cfg.ClientCertPath,
 		cfg.ClientKeyPath,
@@ -73,7 +89,16 @@ maxbufferlines=%d
 		cfg.MaxBufferLines,
 	)
 
-	return os.WriteFile(configPath, []byte(configData), 0600)
+	// Add any extra config fields
+	var extraConfig strings.Builder
+	for key, value := range cfg.ExtraConfig {
+		extraConfig.WriteString(fmt.Sprintf("%s=%s\n", key, value))
+	}
+
+	// Combine all config data
+	fullConfig := configData + extraConfig.String()
+
+	return os.WriteFile(configPath, []byte(fullConfig), 0600)
 }
 
 // parseConfigFile parses the config file at the given path into a BotConfig struct.
@@ -84,7 +109,10 @@ func parseConfigFile(configPath string) (*BotConfig, error) {
 	}
 	defer file.Close()
 
-	cfg := &BotConfig{}
+	cfg := &BotConfig{
+		ExtraConfig: make(map[string]string), // Initialize the map
+	}
+
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -96,21 +124,13 @@ func parseConfigFile(configPath string) (*BotConfig, error) {
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
 
+		// Process known config fields
+		handled := true
 		switch key {
 		case "datadir":
 			cfg.DataDir = value
-		case "isf2p":
-			cfg.IsF2P = value == "true"
-		case "minbetamt":
-			fmt.Sscanf(value, "%f", &cfg.MinBetAmt)
 		case "rpcurl":
 			cfg.RPCURL = value
-		case "grpchost":
-			cfg.GRPCHost = value
-		case "grpcport":
-			cfg.GRPCPort = value
-		case "httpport":
-			cfg.HttpPort = value
 		case "servercertpath":
 			cfg.ServerCertPath = value
 		case "clientcertpath":
@@ -129,6 +149,13 @@ func parseConfigFile(configPath string) (*BotConfig, error) {
 			fmt.Sscanf(value, "%d", &cfg.MaxLogFiles)
 		case "maxbufferlines":
 			fmt.Sscanf(value, "%d", &cfg.MaxBufferLines)
+		default:
+			handled = false
+		}
+
+		// If this is not a known field, store it in the ExtraConfig map
+		if !handled {
+			cfg.ExtraConfig[key] = value
 		}
 	}
 
@@ -175,19 +202,16 @@ func LoadBotConfig(configPath string, fileName string) (*BotConfig, error) {
 	cfg := &BotConfig{
 		DataDir:        configPath,
 		RPCURL:         "wss://127.0.0.1:7676/ws",
-		GRPCHost:       "127.0.0.1",
-		GRPCPort:       "50051",
-		HttpPort:       "8888",
 		ServerCertPath: filepath.Join(defaultBRClientDir, "rpc.cert"),
 		ClientCertPath: filepath.Join(defaultBRClientDir, "rpc-client.cert"),
 		ClientKeyPath:  filepath.Join(defaultBRClientDir, "rpc-client.key"),
 		RPCUser:        rpcUser,
 		RPCPass:        rpcPass,
 		Debug:          "info",
-		MinBetAmt:      0.00000001,
 		LogFile:        filepath.Join(configPath, "logs", "chatbot.log"),
 		MaxLogFiles:    5,
 		MaxBufferLines: 1000,
+		ExtraConfig:    make(map[string]string), // Initialize the map for new configs
 	}
 
 	// Write default config

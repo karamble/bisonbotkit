@@ -6,90 +6,20 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/companyzero/bisonrelay/clientrpc/types"
 	kit "github.com/vctt94/bisonbotkit"
 	"github.com/vctt94/bisonbotkit/config"
 	"github.com/vctt94/bisonbotkit/logging"
-	"golang.org/x/sync/errgroup"
 )
 
 var (
 	flagAppRoot = flag.String("approot", "~/.chatbot", "Path to application data directory")
 )
-
-func sendLoop(ctx context.Context, bot *kit.Bot) error {
-	r := bufio.NewScanner(os.Stdin)
-	for r.Scan() {
-		line := strings.TrimSpace(r.Text())
-		tokens := strings.SplitN(line, " ", 2)
-		if len(tokens) != 2 {
-			bot.Log.Warn("Read line from stdin without 2 tokens")
-			continue
-		}
-
-		user, msg := tokens[0], tokens[1]
-		req := &types.PMRequest{
-			User: user,
-			Msg: &types.RMPrivateMessage{
-				Message: msg,
-			},
-		}
-		var res types.PMResponse
-		err := bot.Chat.PM(ctx, req, &res)
-		if err != nil {
-			if err == context.Canceled {
-				return err
-			}
-			bot.Log.Warnf("Unable to send last message: %v", err)
-			continue
-		}
-
-		fmt.Printf("-> %v %v\n", user, msg)
-	}
-	return r.Err()
-}
-
-func receiveLoop(ctx context.Context, bot *kit.Bot) error {
-	var ackRes types.AckResponse
-	var ackReq types.AckRequest
-
-	for {
-		streamReq := types.PMStreamRequest{UnackedFrom: ackReq.SequenceId}
-		stream, err := bot.Chat.PMStream(ctx, &streamReq)
-		if err != nil {
-			if err == context.Canceled {
-				return err
-			}
-			bot.Log.Warnf("Error while obtaining PM stream: %v", err)
-			continue
-		}
-
-		for {
-			var pm types.ReceivedPM
-			err := stream.Recv(&pm)
-			if err != nil {
-				if err == context.Canceled {
-					return err
-				}
-				bot.Log.Warnf("Error while receiving stream: %v", err)
-				break
-			}
-
-			fmt.Printf("<- %v %v\n", pm.Nick, pm.Msg.Message)
-
-			// Ack the message
-			ackReq.SequenceId = pm.SequenceId
-			err = bot.Chat.AckReceivedPM(ctx, &ackReq, &ackRes)
-			if err != nil {
-				bot.Log.Warnf("Error while ack'ing received pm: %v", err)
-				break
-			}
-		}
-	}
-}
 
 func realMain() error {
 	flag.Parse()
@@ -104,6 +34,10 @@ func realMain() error {
 	if err != nil {
 		return fmt.Errorf("failed to initialize logging: %v", err)
 	}
+	defer logBackend.Close()
+
+	// Get a logger for the application
+	log := logBackend.Logger("ChatBot")
 
 	// Load bot configuration
 	cfg, err := config.LoadBotConfig(*flagAppRoot, "chatbot.conf")
@@ -111,25 +45,68 @@ func realMain() error {
 		return fmt.Errorf("failed to load config: %v", err)
 	}
 
+	// Create a bidirectional channel
+	pmChan := make(chan types.ReceivedPM)
+	// Assign the send side to the config
+	cfg.PMChan = pmChan
+	cfg.PMLog = logBackend.Logger("PM")
+
 	// Create new bot instance
 	bot, err := kit.NewBot(cfg, logBackend)
 	if err != nil {
 		return fmt.Errorf("failed to create bot: %v", err)
 	}
 
-	// Set up context and error group
+	// Add a goroutine to handle PMs using our bidirectional channel
+	go func() {
+		for pm := range pmChan {
+			log.Infof("Received PM from %s: %s", pm.Nick, pm.Msg)
+		}
+	}()
+
+	// Set up context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	g, gctx := errgroup.WithContext(ctx)
 
-	// Start the bot's RPC client
-	g.Go(func() error { return bot.Run(gctx) })
+	// Add input handling goroutine
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			tokens := strings.SplitN(line, " ", 2)
+			if len(tokens) != 2 {
+				log.Warn("Invalid format. Use: <nick> <message>")
+				continue
+			}
 
-	// Start send and receive loops
-	g.Go(func() error { return sendLoop(gctx, bot) })
-	g.Go(func() error { return receiveLoop(gctx, bot) })
+			nick, msg := tokens[0], tokens[1]
+			if err := bot.SendPM(ctx, nick, msg); err != nil {
+				log.Warnf("Failed to send PM: %v", err)
+				continue
+			}
+			log.Infof("-> %s: %s", nick, msg)
+		}
+		if err := scanner.Err(); err != nil {
+			log.Errorf("Error reading input: %v", err)
+		}
+	}()
 
-	return g.Wait()
+	// Set up signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-sigChan
+		log.Infof("Received shutdown signal: %v", sig)
+		bot.Close()
+		cancel()
+	}()
+
+	// Run the bot with the cancellable context
+	if err := bot.Run(ctx); err != nil {
+		return fmt.Errorf("bot error: %v", err)
+	}
+
+	return nil
 }
 
 func main() {
