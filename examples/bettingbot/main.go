@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 
 	"github.com/companyzero/bisonrelay/clientrpc/types"
@@ -19,197 +18,111 @@ import (
 	kit "github.com/vctt94/bisonbotkit"
 	"github.com/vctt94/bisonbotkit/config"
 	"github.com/vctt94/bisonbotkit/logging"
+	"github.com/vctt94/bisonbotkit/utils"
 )
-
-type BetManager struct {
-	sync.RWMutex
-	currentGame *Bet
-}
-
-type Bet struct {
-	TotalPool int64 // in matoms
-	Bets      map[zkidentity.ShortID]UserBet
-	Status    string // "open" or "closed"
-	Number    int    // The randomly generated number
-}
-
-type UserBet struct {
-	Amount int64
-	Number int // The actual number the user bet on
-}
-
-func NewBetManager() *BetManager {
-	return &BetManager{
-		currentGame: &Bet{
-			Bets:   make(map[zkidentity.ShortID]UserBet),
-			Status: "open",
-		},
-	}
-}
 
 var (
 	flagAppRoot = flag.String("approot", "~/.bettingbot", "Path to application data directory")
 )
 
-// Handle incoming PMs for betting commands
-func (bm *BetManager) handlePM(ctx context.Context, bot *kit.Bot, pm *types.ReceivedPM) {
+// handlePM handles incoming PM commands.
+func handlePM(ctx context.Context, bot *kit.Bot, pm *types.ReceivedPM) {
 	tokens := strings.Fields(pm.Msg.Message)
 	if len(tokens) == 0 {
 		return
 	}
 
 	cmd := strings.ToLower(tokens[0])
-	switch cmd {
-	case "!bet":
-		if len(tokens) != 3 {
-			bot.SendPM(ctx, pm.Nick, "Usage: !bet <number> <amount>")
+
+	// Expected usage: "bet <amount in DCR> <odd|even>"
+	if cmd == "bet" && len(tokens) == 3 {
+		// 1) Parse the bet amount
+		betFloat, err := strconv.ParseFloat(tokens[1], 64)
+		if err != nil {
+			bot.SendPM(ctx, pm.Nick, "Invalid bet amount. Please enter a valid number.")
 			return
 		}
 
-		number, err := strconv.Atoi(tokens[1])
+		// Convert float to dcrutil.Amount
+		betAmount, err := dcrutil.NewAmount(betFloat)
 		if err != nil {
-			bot.SendPM(ctx, pm.Nick, "Invalid number. Please enter a valid integer")
+			bot.SendPM(ctx, pm.Nick, "Invalid DCR amount. Please enter a valid number.")
+			return
+		}
+		if betAmount <= 0 {
+			bot.SendPM(ctx, pm.Nick, "Bet amount must be greater than 0.")
 			return
 		}
 
-		amt, err := strconv.ParseFloat(tokens[2], 64)
-		if err != nil {
-			bot.SendPM(ctx, pm.Nick, "Invalid amount")
-			return
-		}
-		amount, err := dcrutil.NewAmount(amt)
-		if err != nil {
-			bot.SendPM(ctx, pm.Nick, "Invalid amount")
+		// 2) Parse the choice ("odd" or "even")
+		choice := strings.ToLower(tokens[2])
+		if choice != "odd" && choice != "even" {
+			bot.SendPM(ctx, pm.Nick, "Invalid choice. Please use 'odd' or 'even'.")
 			return
 		}
 
-		bm.Lock()
-		if bm.currentGame.Status != "open" {
-			bm.Unlock()
-			bot.SendPM(ctx, pm.Nick, "No active game right now")
-			return
+		// 3) Generate a random number
+		randomNum := rand.Intn(100) + 1
+		isRandomEven := (randomNum%2 == 0)
+		userWon := false
+		if (choice == "even" && isRandomEven) || (choice == "odd" && !isRandomEven) {
+			userWon = true
 		}
+
+		// 4) Build result message
+		resultMsg := fmt.Sprintf(
+			"You bet %.8f DCR on '%s'. Random number: %d (%s).",
+			betAmount.ToCoin(),
+			choice,
+			randomNum,
+			func() string {
+				if isRandomEven {
+					return "even"
+				}
+				return "odd"
+			}(),
+		)
 
 		var uid zkidentity.ShortID
-		uid.FromString(pm.String())
+		uid.FromBytes(pm.Uid)
 
-		bm.currentGame.Bets[uid] = UserBet{
-			Amount: int64(amount),
-			Number: number,
-		}
-		bm.currentGame.TotalPool += int64(amount)
-		bm.Unlock()
-
-		oddEven := "odd"
-		if number%2 == 0 {
-			oddEven = "even"
-		}
-		bot.SendPM(ctx, pm.Nick, fmt.Sprintf("Please send %.8f DCR to confirm your bet on number %d (%s)", amount.ToCoin(), number, oddEven))
-
-	case "!draw":
-		bm.Lock()
-		if bm.currentGame.Status != "open" || len(bm.currentGame.Bets) == 0 {
-			bm.Unlock()
-			bot.SendPM(ctx, pm.Nick, "No active game with bets")
-			return
-		}
-
-		// Generate random number
-		bm.currentGame.Status = "closed"
-		bm.currentGame.Number = rand.Intn(100) + 1 // Random number between 1 and 100
-		drawnOddEven := "odd"
-		if bm.currentGame.Number%2 == 0 {
-			drawnOddEven = "even"
-		}
-
-		// Announce result
-		bot.SendPM(ctx, pm.Nick, fmt.Sprintf("Number drawn: %d (%s)", bm.currentGame.Number, drawnOddEven))
-
-		// Process payouts
-		processPayout(ctx, bot, bm.currentGame)
-
-		// Start new game
-		bm.currentGame = &Bet{
-			Bets:   make(map[zkidentity.ShortID]UserBet),
-			Status: "open",
-		}
-		bm.Unlock()
-	}
-}
-
-func processPayout(ctx context.Context, bot *kit.Bot, bet *Bet) {
-	drawnIsEven := bet.Number%2 == 0
-
-	winningPool := int64(0)
-	losingPool := int64(0)
-
-	// Calculate pools based on odd/even
-	for _, userBet := range bet.Bets {
-		userBetIsEven := userBet.Number%2 == 0
-		if userBetIsEven == drawnIsEven {
-			winningPool += userBet.Amount
+		// 5) Pay out if the user won
+		if userWon {
+			payout := betAmount * 2 // double the bet for demonstration
+			err := bot.PayTip(ctx, uid, payout, 3)
+			if err != nil {
+				fmt.Println("Error sending tip:", err)
+				bot.SendPM(ctx, pm.Nick,
+					resultMsg+" You won, but there was an error sending your tip: "+err.Error())
+				return
+			}
+			bot.SendPM(ctx, pm.Nick,
+				fmt.Sprintf("%s Congratulations! You won %.8f DCR!", resultMsg, payout.ToCoin()))
 		} else {
-			losingPool += userBet.Amount
+			bot.SendPM(ctx, pm.Nick, resultMsg+" Sorry, you lost!")
 		}
+
+	} else {
+		// Fallback or help message
+		bot.SendPM(ctx, pm.Nick, "Usage: bet <amount in DCR> <odd|even>")
 	}
-
-	// Process payouts
-	for uid, userBet := range bet.Bets {
-		userBetIsEven := userBet.Number%2 == 0
-		if userBetIsEven == drawnIsEven {
-			// Winners get their bet back plus proportional share of losing pool
-			proportion := float64(userBet.Amount) / float64(winningPool)
-			winnings := userBet.Amount + int64(float64(losingPool)*proportion)
-			bot.PayTip(ctx, uid, dcrutil.Amount(winnings), 3)
-			bot.SendPM(ctx, uid.String(), fmt.Sprintf("Congratulations! You bet %d and won %.8f DCR", userBet.Number, dcrutil.Amount(winnings).ToCoin()))
-		} else {
-			bot.SendPM(ctx, uid.String(), fmt.Sprintf("Sorry, you bet %d and lost this round!", userBet.Number))
-		}
-	}
-}
-
-// Handle incoming tips to confirm bets
-func (bm *BetManager) handleTip(ctx context.Context, bot *kit.Bot, tip *types.ReceivedTip) {
-	bm.Lock()
-	defer bm.Unlock()
-
-	var userID zkidentity.ShortID
-	userID.FromBytes(tip.Uid)
-
-	// Check if user has a pending bet
-	userBet, exists := bm.currentGame.Bets[userID]
-	if !exists || bm.currentGame.Status != "open" {
-		// No pending bet, refund the tip
-		bot.PayTip(ctx, userID, dcrutil.Amount(tip.AmountMatoms), 3)
-		bot.SendPM(ctx, userID.String(), "No pending bet found. Your tip has been refunded.")
-		return
-	}
-
-	// Verify tip amount matches bet amount
-	if tip.AmountMatoms != userBet.Amount {
-		// Amount mismatch, refund the tip
-		bot.PayTip(ctx, userID, dcrutil.Amount(tip.AmountMatoms), 3)
-		bot.SendPM(ctx, userID.String(), "Tip amount doesn't match bet amount. Your tip has been refunded.")
-		return
-	}
-
-	// Send confirmation
-	oddEven := "odd"
-	if userBet.Number%2 == 0 {
-		oddEven = "even"
-	}
-	bot.SendPM(ctx, userID.String(), fmt.Sprintf("Bet confirmed! You bet %d (%s) for %.8f DCR",
-		userBet.Number,
-		oddEven,
-		dcrutil.Amount(userBet.Amount).ToCoin()))
 }
 
 func realMain() error {
 	flag.Parse()
 
+	// Expand and clean the app root path
+	appRoot := utils.CleanAndExpandPath(*flagAppRoot)
+
+	// Ensure the log directory exists
+	logDir := filepath.Join(appRoot, "logs")
+	if err := os.MkdirAll(logDir, 0700); err != nil {
+		return fmt.Errorf("failed to create log directory: %v", err)
+	}
+
 	// Initialize logging
 	logBackend, err := logging.NewLogBackend(logging.LogConfig{
-		LogFile:     filepath.Join(*flagAppRoot, "logs", "bettingbot.log"),
+		LogFile:     filepath.Join(logDir, "bettingbot.log"),
 		DebugLevel:  "info",
 		MaxLogFiles: 5,
 	})
@@ -221,23 +134,27 @@ func realMain() error {
 	log := logBackend.Logger("BettingBot")
 
 	// Load bot configuration
-	cfg, err := config.LoadBotConfig(*flagAppRoot, "bettingbot.conf")
+	cfg, err := config.LoadBotConfig(appRoot, "bettingbot.conf")
 	if err != nil {
 		return fmt.Errorf("failed to load config: %v", err)
 	}
 
-	// Create channels for handling tips and PMs
-	tipChan := make(chan types.ReceivedTip)
+	// Create channels for handling PMs and tips
 	pmChan := make(chan types.ReceivedPM)
+	tipChan := make(chan types.ReceivedTip)
 	tipProgressChan := make(chan types.TipProgressEvent)
 
-	cfg.TipProgressChan = tipProgressChan
+	// Set up PM channel and log
 	cfg.PMChan = pmChan
-	cfg.TipReceivedChan = tipChan
-	cfg.TipLog = logBackend.Logger("TIP")
 	cfg.PMLog = logBackend.Logger("PM")
 
-	// Create new bot instance
+	// Set up tip channels/logs
+	cfg.TipLog = logBackend.Logger("TIP")
+	cfg.TipProgressChan = tipProgressChan
+	cfg.TipReceivedLog = logBackend.Logger("TIP_RECEIVED")
+	cfg.TipReceivedChan = tipChan
+
+	// Create the bot
 	bot, err := kit.NewBot(cfg, logBackend)
 	if err != nil {
 		return fmt.Errorf("failed to create bot: %v", err)
@@ -247,7 +164,7 @@ func realMain() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Set up signal handling
+	// Handle shutdown signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	go func() {
@@ -257,23 +174,48 @@ func realMain() error {
 		cancel()
 	}()
 
-	betManager := NewBetManager()
-
 	// Handle PMs
 	go func() {
 		for pm := range pmChan {
-			betManager.handlePM(ctx, bot, &pm)
+			handlePM(ctx, bot, &pm)
 		}
 	}()
 
-	// Handle tips
+	// Handle received tips
 	go func() {
 		for tip := range tipChan {
-			betManager.handleTip(ctx, bot, &tip)
+			var userID zkidentity.ShortID
+			userID.FromBytes(tip.Uid)
+
+			log.Infof("Tip received: %.8f DCR from %s",
+				dcrutil.Amount(tip.AmountMatoms/1e3).ToCoin(),
+				userID.String())
+
+			bot.SendPM(ctx, userID.String(),
+				fmt.Sprintf("Thank you for the tip of %.8f DCR!",
+					dcrutil.Amount(tip.AmountMatoms/1e3).ToCoin()))
+
+			bot.AckTipReceived(ctx, tip.SequenceId)
 		}
 	}()
 
-	return bot.Run(ctx)
+	// Handle tip progress updates
+	go func() {
+		for progress := range tipProgressChan {
+			log.Infof("Tip progress event (sequence ID: %d)", progress.SequenceId)
+
+			// Acknowledge tip progress
+			err := bot.AckTipProgress(ctx, progress.SequenceId)
+			if err != nil {
+				log.Errorf("Failed to acknowledge tip progress: %v", err)
+			}
+		}
+	}()
+
+	// Run the bot
+	err = bot.Run(ctx)
+	log.Infof("Bot exited: %v", err)
+	return err
 }
 
 func main() {
