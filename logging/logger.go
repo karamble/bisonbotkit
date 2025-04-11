@@ -38,8 +38,13 @@ func (b *LogBuffer) Write(p []byte) (n int, err error) {
 
 	line := string(p)
 	if len(b.lines) >= b.max {
-		// Remove oldest line by shifting all elements left
-		b.lines = append(b.lines[1:], line)
+		if len(b.lines) > 0 {
+			// Remove oldest line by shifting all elements left
+			b.lines = append(b.lines[1:], line)
+		} else {
+			// Handle empty array case
+			b.lines = append(b.lines, line)
+		}
 	} else {
 		b.lines = append(b.lines, line)
 	}
@@ -51,6 +56,10 @@ func (b *LogBuffer) Write(p []byte) (n int, err error) {
 func (b *LogBuffer) LastLogLines(n int) []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	if len(b.lines) == 0 {
+		return []string{}
+	}
 
 	if n > len(b.lines) {
 		n = len(b.lines)

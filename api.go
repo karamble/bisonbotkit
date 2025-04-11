@@ -144,7 +144,7 @@ func (b *Bot) AckTipReceived(ctx context.Context, sequenceId uint64) error {
 	var ackRes types.AckResponse
 
 	ackReq.SequenceId = sequenceId
-	err := b.paymentService.AckTipProgress(ctx, &ackReq, &ackRes)
+	err := b.paymentService.AckTipReceived(ctx, &ackReq, &ackRes)
 	if err != nil {
 		b.tipReceivedLog.Errorf("Failed to acknowledge tip: %v", err)
 	}
