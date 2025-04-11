@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"os"
 	"os/signal"
@@ -25,6 +26,7 @@ import (
 var (
 	flagAppRoot  = flag.String("approot", "~/.braibot", "Path to application data directory")
 	currentModel = "fast-sdxl" // Default model
+	debug        = true        // Set to true for debugging
 )
 
 // Available models for text2image
@@ -36,6 +38,11 @@ var availableModels = []string{
 	"flux-pro/v1.1",
 	"flux-pro/v1.1-ultra",
 	"flux/schnell",
+}
+
+// Map to hold the current model for each command
+var currentModels = map[string]string{
+	"text2image": "fast-sdxl", // Default model for text2image
 }
 
 // Command represents a bot command
@@ -98,17 +105,24 @@ func init() {
 		},
 		"setmodel": {
 			Name:        "setmodel",
-			Description: "Sets the model to use for text2image commands. Usage: !setmodel text2image [modelname]",
+			Description: "Sets the model to use for specified commands. Usage: !setmodel [command] [modelname]",
 			Handler: func(ctx context.Context, bot *kit.Bot, cfg *config.BotConfig, nick string, args []string) error {
-				if len(args) < 1 {
-					return bot.SendPM(ctx, nick, "Please specify a model name. Usage: !setmodel text2image [modelname]")
+				if len(args) < 2 {
+					return bot.SendPM(ctx, nick, "Please specify a command and a model name. Usage: !setmodel [command] [modelname]")
 				}
-				modelName := args[0]
+				commandName := args[0]
+				modelName := args[1]
+
+				// Check if the command is valid
+				if _, exists := commands[commandName]; !exists {
+					return bot.SendPM(ctx, nick, "Invalid command name. Use !listmodels to see available commands.")
+				}
+
 				// Check if the model is valid
 				for _, model := range availableModels {
 					if model == modelName {
-						currentModel = modelName
-						return bot.SendPM(ctx, nick, fmt.Sprintf("Model set to: %s", currentModel))
+						currentModels[commandName] = modelName
+						return bot.SendPM(ctx, nick, fmt.Sprintf("Model for %s set to: %s", commandName, modelName))
 					}
 				}
 				return bot.SendPM(ctx, nick, "Invalid model name. Use !listmodels to see available models.")
@@ -132,8 +146,11 @@ func init() {
 					return err
 				}
 
+				// Use the current model for text2image
+				modelToUse := currentModels["text2image"]
+
 				// Create HTTP request for initial call
-				req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://queue.fal.run/fal-ai/%s", currentModel), bytes.NewBuffer(requestBody))
+				req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://queue.fal.run/fal-ai/%s", modelToUse), bytes.NewBuffer(requestBody))
 				if err != nil {
 					return err
 				}
@@ -230,6 +247,11 @@ func init() {
 								return err
 							}
 
+							// Debug output
+							if debug {
+								fmt.Printf("Final Response Body: %s\n", string(finalBody))
+							}
+
 							// Unmarshal the final response
 							var finalResponse struct {
 								Images []struct {
@@ -241,20 +263,25 @@ func init() {
 								Timings struct {
 									Inference float64 `json:"inference"`
 								} `json:"timings"`
-								Seed            int64  `json:"seed"`
-								HasNSFWConcepts []bool `json:"has_nsfw_concepts"`
-								Prompt          string `json:"prompt"`
+								Seed            json.Number `json:"seed"`
+								HasNSFWConcepts []bool      `json:"has_nsfw_concepts"`
+								Prompt          string      `json:"prompt"`
 							}
 							if err := json.Unmarshal(finalBody, &finalResponse); err != nil {
 								return err
 							}
 
-							if len(finalResponse.Images) > 0 {
-								return bot.SendPM(ctx, nick, fmt.Sprintf("Here's your generated image: %s", finalResponse.Images[0].URL))
+							// After unmarshaling, check if Seed is present
+							if finalResponse.Seed != "" {
+								seedValue := new(big.Int)
+								if _, ok := seedValue.SetString(string(finalResponse.Seed), 10); !ok {
+									return bot.SendPM(ctx, nick, fmt.Sprintf("Error parsing seed value: %v", err))
+								}
+								// Use seedValue for some logic, for example, include it in the response
+								return bot.SendPM(ctx, nick, fmt.Sprintf("Here's your generated image: %s (Seed: %s)", finalResponse.Images[0].URL, seedValue.String()))
 							} else {
-								// Send the complete raw response body as PM
-								responseMessage := fmt.Sprintf("No image was generated. Complete response: %s", string(finalBody))
-								return bot.SendPM(ctx, nick, responseMessage)
+								// Handle the case where Seed is not present
+								return bot.SendPM(ctx, nick, fmt.Sprintf("Here's your generated image: %s", finalResponse.Images[0].URL))
 							}
 						case "FAILED":
 							// Send the complete raw response body as PM
