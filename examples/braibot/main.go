@@ -4,12 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
-	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -29,15 +30,50 @@ var (
 	debug        = true        // Set to true for debugging
 )
 
-// Available models for text2image
-var availableModels = []string{
-	"fast-sdxl",
-	"hidream-i1-full",
-	"hidream-i1-dev",
-	"hidream-i1-fast",
-	"flux-pro/v1.1",
-	"flux-pro/v1.1-ultra",
-	"flux/schnell",
+// Define a struct for the model details
+type Model struct {
+	Name        string  // Name of the model
+	Description string  // Description of the model
+	Price       float64 // Price per picture in USD
+}
+
+// Update availableModels to hold Model structs
+var availableModels = []Model{
+	{
+		Name:        "fast-sdxl",
+		Description: "Fast model for generating images quickly.",
+		Price:       0.0022,
+	},
+	{
+		Name:        "hidream-i1-full",
+		Description: "High-quality model for detailed images.",
+		Price:       0.0050,
+	},
+	{
+		Name:        "hidream-i1-dev",
+		Description: "Development version of the HiDream model.",
+		Price:       0.0035,
+	},
+	{
+		Name:        "hidream-i1-fast",
+		Description: "Faster version of the HiDream model.",
+		Price:       0.0028,
+	},
+	{
+		Name:        "flux-pro/v1.1",
+		Description: "Professional model for high-end image generation.",
+		Price:       0.0070,
+	},
+	{
+		Name:        "flux-pro/v1.1-ultra",
+		Description: "Ultra version of the professional model.",
+		Price:       0.0100,
+	},
+	{
+		Name:        "flux/schnell",
+		Description: "Quick model for rapid image generation.",
+		Price:       0.0015,
+	},
 }
 
 // Map to hold the current model for each command
@@ -98,7 +134,7 @@ func init() {
 			Handler: func(ctx context.Context, bot *kit.Bot, cfg *config.BotConfig, nick string, args []string) error {
 				modelList := "Available models for text2image:\n"
 				for _, model := range availableModels {
-					modelList += fmt.Sprintf("- %s\n", model)
+					modelList += fmt.Sprintf("- %s: %s (Price: $%.4f)\n", model.Name, model.Description, model.Price)
 				}
 				return bot.SendPM(ctx, nick, modelList)
 			},
@@ -120,9 +156,9 @@ func init() {
 
 				// Check if the model is valid
 				for _, model := range availableModels {
-					if model == modelName {
-						currentModels[commandName] = modelName
-						return bot.SendPM(ctx, nick, fmt.Sprintf("Model for %s set to: %s", commandName, modelName))
+					if model.Name == modelName {
+						currentModels[commandName] = model.Name
+						return bot.SendPM(ctx, nick, fmt.Sprintf("Model for %s set to: %s", commandName, model.Name))
 					}
 				}
 				return bot.SendPM(ctx, nick, "Invalid model name. Use !listmodels to see available models.")
@@ -271,17 +307,42 @@ func init() {
 								return err
 							}
 
-							// After unmarshaling, check if Seed is present
-							if finalResponse.Seed != "" {
-								seedValue := new(big.Int)
-								if _, ok := seedValue.SetString(string(finalResponse.Seed), 10); !ok {
-									return bot.SendPM(ctx, nick, fmt.Sprintf("Error parsing seed value: %v", err))
+							// Assuming the first image is the one we want to send
+							if len(finalResponse.Images) > 0 {
+								imageURL := finalResponse.Images[0].URL
+								// Fetch the image data
+								imgResp, err := http.Get(imageURL)
+								if err != nil {
+									return err
 								}
-								// Use seedValue for some logic, for example, include it in the response
-								return bot.SendPM(ctx, nick, fmt.Sprintf("Here's your generated image: %s (Seed: %s)", finalResponse.Images[0].URL, seedValue.String()))
+								defer imgResp.Body.Close()
+
+								imgData, err := io.ReadAll(imgResp.Body)
+								if err != nil {
+									return err
+								}
+
+								// Encode the image data to base64
+								encodedImage := base64.StdEncoding.EncodeToString(imgData)
+
+								// Determine the image type from ContentType
+								var imageType string
+								switch finalResponse.Images[0].ContentType {
+								case "image/jpeg":
+									imageType = "image/jpeg"
+								case "image/png":
+									imageType = "image/png"
+								case "image/webp":
+									imageType = "image/webp"
+								default:
+									imageType = "image/jpeg" // Fallback to jpeg if unknown
+								}
+
+								// Create the message with embedded image, using the user's prompt as the alt text
+								message := fmt.Sprintf("--embed[alt=%s,type=%s,data=%s]--", url.QueryEscape(prompt), imageType, encodedImage)
+								return bot.SendPM(ctx, nick, message)
 							} else {
-								// Handle the case where Seed is not present
-								return bot.SendPM(ctx, nick, fmt.Sprintf("Here's your generated image: %s", finalResponse.Images[0].URL))
+								return bot.SendPM(ctx, nick, "No images were generated.")
 							}
 						case "FAILED":
 							// Send the complete raw response body as PM
